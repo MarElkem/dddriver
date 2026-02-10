@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "DD DRIVER",
+    "slug": "dd-driver-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#D7DEED"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.dddriver.app",
+      "config": {
+        "googleMapsApiKey": "YOUR_GOOGLE_MAPS_API_KEY"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#D7DEED"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.dddriver.app",
+      "config": {
+        "googleMaps": {
+          "apiKey": "YOUR_GOOGLE_MAPS_API_KEY"
+        }
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "node_modules/@expo-google-fonts/lexend/Lexend_300Light.ttf",
+            "node_modules/@expo-google-fonts/lexend/Lexend_400Regular.ttf",
+            "node_modules/@expo-google-fonts/lexend/Lexend_500Medium.ttf",
+            "node_modules/@expo-google-fonts/lexend/Lexend_600SemiBold.ttf",
+            "node_modules/@expo-google-fonts/lexend/Lexend_700Bold.ttf"
+          ]
+        }
+      ]
+    ]
+  }
+}
