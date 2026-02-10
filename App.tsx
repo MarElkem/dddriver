@@ -27,12 +27,24 @@ import MapView, { LatLng, Marker, Polyline } from 'react-native-maps';
 type TabKey = 'request' | 'howTo' | 'profile';
 type LocationField = 'pickup' | 'dropoff';
 
+type RideTemplate = {
+  id: string;
+  title: string;
+  detail: string;
+  baseFare: number;
+  perKmFare: number;
+  speedKph: number;
+  dispatchMins: number;
+};
+
 type RideOption = {
   id: string;
   title: string;
   detail: string;
   eta: string;
   fare: string;
+  etaMinutes: number;
+  fareAmount: number;
 };
 
 type LocationSuggestion = {
@@ -40,6 +52,13 @@ type LocationSuggestion = {
   displayName: string;
   latitude: number;
   longitude: number;
+};
+
+type QuickPlace = {
+  id: string;
+  label: string;
+  address: string;
+  coordinate: LatLng;
 };
 
 const COLORS = {
@@ -58,27 +77,33 @@ const TAB_ITEMS = [
   { key: 'profile', label: 'Profile', icon: 'account-circle-outline' },
 ] as const;
 
-const RIDE_OPTIONS: RideOption[] = [
+const RIDE_TEMPLATES: RideTemplate[] = [
   {
     id: 'classic',
     title: 'DD Classic',
     detail: 'Fast pickup with one designated driver',
-    eta: '8 min',
-    fare: '$22',
+    baseFare: 12,
+    perKmFare: 2.3,
+    speedKph: 28,
+    dispatchMins: 5,
   },
   {
     id: 'priority',
     title: 'DD Priority',
     detail: 'Closest available driver dispatched first',
-    eta: '5 min',
-    fare: '$29',
+    baseFare: 16,
+    perKmFare: 2.8,
+    speedKph: 34,
+    dispatchMins: 3,
   },
   {
     id: 'comfort',
     title: 'DD Comfort',
     detail: 'Extra assistance and premium support',
-    eta: '10 min',
-    fare: '$34',
+    baseFare: 18,
+    perKmFare: 3.2,
+    speedKph: 26,
+    dispatchMins: 6,
   },
 ];
 
@@ -99,7 +124,45 @@ const DROPOFF_COORDINATE: LatLng = {
   longitude: -122.4094,
 };
 
+const SAVED_PLACES: QuickPlace[] = [
+  {
+    id: 'home',
+    label: 'Home',
+    address: '150 Oak Ridge, San Francisco',
+    coordinate: { latitude: 37.7892, longitude: -122.4039 },
+  },
+  {
+    id: 'work',
+    label: 'Work',
+    address: '90 Market Street, San Francisco',
+    coordinate: { latitude: 37.7936, longitude: -122.3965 },
+  },
+  {
+    id: 'garage',
+    label: 'Garage',
+    address: '44 Pine Lot, San Francisco',
+    coordinate: { latitude: 37.7897, longitude: -122.4011 },
+  },
+];
+
 const BICYCLE_HERO = require('./assets/bicycle-hero.jpg');
+
+const toRadians = (value: number) => (value * Math.PI) / 180;
+
+const calculateDistanceKm = (start: LatLng, end: LatLng): number => {
+  const earthRadiusKm = 6371;
+  const latDelta = toRadians(end.latitude - start.latitude);
+  const lonDelta = toRadians(end.longitude - start.longitude);
+  const startLat = toRadians(start.latitude);
+  const endLat = toRadians(end.latitude);
+
+  const a =
+    Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
+    Math.sin(lonDelta / 2) * Math.sin(lonDelta / 2) * Math.cos(startLat) * Math.cos(endLat);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadiusKm * c;
+};
 
 const compactAddress = (displayName: string) => {
   const parts = displayName
@@ -109,6 +172,8 @@ const compactAddress = (displayName: string) => {
 
   return parts.slice(0, 3).join(', ');
 };
+
+const shortLabel = (displayName: string) => displayName.split(',')[0].trim();
 
 const fetchLocationSuggestions = async (query: string): Promise<LocationSuggestion[]> => {
   const params = new URLSearchParams({
@@ -143,6 +208,8 @@ const fetchLocationSuggestions = async (query: string): Promise<LocationSuggesti
     .filter((place) => Number.isFinite(place.latitude) && Number.isFinite(place.longitude));
 };
 
+const formatFare = (value: number) => `$${value.toFixed(2)}`;
+
 export default function App() {
   const [fontsLoaded] = useFonts({
     Lexend_400Regular,
@@ -153,13 +220,15 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('request');
   const [pickup, setPickup] = useState('');
   const [dropoff, setDropoff] = useState('');
-  const [selectedRideId, setSelectedRideId] = useState(RIDE_OPTIONS[0].id);
+  const [selectedRideId, setSelectedRideId] = useState(RIDE_TEMPLATES[0].id);
   const [statusMessage, setStatusMessage] = useState('');
   const [pickupCoordinate, setPickupCoordinate] = useState<LatLng>(PICKUP_COORDINATE);
   const [dropoffCoordinate, setDropoffCoordinate] = useState<LatLng>(DROPOFF_COORDINATE);
   const [activeField, setActiveField] = useState<LocationField | null>(null);
+  const [quickAssignField, setQuickAssignField] = useState<LocationField>('dropoff');
   const [pickupSuggestions, setPickupSuggestions] = useState<LocationSuggestion[]>([]);
   const [dropoffSuggestions, setDropoffSuggestions] = useState<LocationSuggestion[]>([]);
+  const [recentPlaces, setRecentPlaces] = useState<QuickPlace[]>([]);
   const [isPickupSearching, setIsPickupSearching] = useState(false);
   const [isDropoffSearching, setIsDropoffSearching] = useState(false);
   const [isMapReady, setIsMapReady] = useState(false);
@@ -170,10 +239,44 @@ export default function App() {
   const requestButtonScale = useRef(new Animated.Value(1)).current;
   const statusOpacity = useRef(new Animated.Value(0)).current;
 
-  const selectedRide = useMemo(
-    () => RIDE_OPTIONS.find((option) => option.id === selectedRideId),
-    [selectedRideId]
+  const distanceKm = useMemo(
+    () => calculateDistanceKm(pickupCoordinate, dropoffCoordinate),
+    [pickupCoordinate, dropoffCoordinate]
   );
+
+  const rideOptions = useMemo<RideOption[]>(
+    () =>
+      RIDE_TEMPLATES.map((template) => {
+        const travelMinutes = (distanceKm / template.speedKph) * 60;
+        const etaMinutes = Math.max(4, Math.round(template.dispatchMins + travelMinutes));
+        const fareAmount = template.baseFare + distanceKm * template.perKmFare;
+
+        return {
+          id: template.id,
+          title: template.title,
+          detail: template.detail,
+          eta: `${etaMinutes} min`,
+          fare: formatFare(fareAmount),
+          etaMinutes,
+          fareAmount,
+        };
+      }),
+    [distanceKm]
+  );
+
+  const selectedRide = useMemo(
+    () => rideOptions.find((option) => option.id === selectedRideId),
+    [rideOptions, selectedRideId]
+  );
+
+  const rememberRecentPlace = (place: QuickPlace) => {
+    setRecentPlaces((current) => {
+      const deduped = current.filter(
+        (entry) => entry.id !== place.id && entry.address.toLowerCase() !== place.address.toLowerCase()
+      );
+      return [place, ...deduped].slice(0, 6);
+    });
+  };
 
   useEffect(() => {
     contentOpacity.setValue(0);
@@ -351,6 +454,41 @@ export default function App() {
     );
   };
 
+  const applyLocation = (
+    field: LocationField,
+    place: QuickPlace,
+    options?: {
+      showToast?: boolean;
+      remember?: boolean;
+      toastLabel?: string;
+    }
+  ) => {
+    const shouldRemember = options?.remember ?? true;
+    const shouldToast = options?.showToast ?? false;
+    const toastLabel = options?.toastLabel ?? place.label;
+
+    if (field === 'pickup') {
+      setPickup(place.address);
+      setPickupCoordinate(place.coordinate);
+      setPickupSuggestions([]);
+    } else {
+      setDropoff(place.address);
+      setDropoffCoordinate(place.coordinate);
+      setDropoffSuggestions([]);
+    }
+
+    if (shouldRemember) {
+      rememberRecentPlace(place);
+    }
+
+    setActiveField(null);
+    animateMapToCoordinate(place.coordinate);
+
+    if (shouldToast) {
+      setStatusMessage(`${toastLabel} set as ${field === 'pickup' ? 'pickup' : 'drop-off'}.`);
+    }
+  };
+
   const handleUseCurrentLocation = async () => {
     try {
       const permission = await Location.requestForegroundPermissionsAsync();
@@ -368,47 +506,60 @@ export default function App() {
         longitude: currentLocation.coords.longitude,
       };
 
-      setPickupCoordinate(coordinate);
-      setPickupSuggestions([]);
-      setActiveField(null);
-      animateMapToCoordinate(coordinate);
-
       const reversedAddresses = await Location.reverseGeocodeAsync(coordinate);
       const bestMatch = reversedAddresses[0];
 
-      if (bestMatch) {
-        const lineOne = [bestMatch.name, bestMatch.street].filter(Boolean).join(' ');
-        const lineTwo = [bestMatch.city, bestMatch.region].filter(Boolean).join(', ');
-        const formattedAddress = [lineOne.trim(), lineTwo].filter(Boolean).join(', ');
-        setPickup(formattedAddress || 'Current location');
-      } else {
-        setPickup('Current location');
-      }
+      const lineOne = [bestMatch?.name, bestMatch?.street].filter(Boolean).join(' ');
+      const lineTwo = [bestMatch?.city, bestMatch?.region].filter(Boolean).join(', ');
+      const formattedAddress = [lineOne.trim(), lineTwo].filter(Boolean).join(', ');
 
-      setStatusMessage('Pickup updated to your current location.');
+      const place: QuickPlace = {
+        id: 'current-location',
+        label: 'Current location',
+        address: formattedAddress || 'Current location',
+        coordinate,
+      };
+
+      applyLocation('pickup', place, {
+        remember: true,
+        showToast: true,
+        toastLabel: 'Current location',
+      });
     } catch {
       setStatusMessage('Unable to get your current location right now.');
     }
   };
 
   const handleSelectSuggestion = (field: LocationField, suggestion: LocationSuggestion) => {
-    const coordinate = {
-      latitude: suggestion.latitude,
-      longitude: suggestion.longitude,
+    const place: QuickPlace = {
+      id: suggestion.id,
+      label: shortLabel(suggestion.displayName),
+      address: compactAddress(suggestion.displayName),
+      coordinate: {
+        latitude: suggestion.latitude,
+        longitude: suggestion.longitude,
+      },
     };
 
-    if (field === 'pickup') {
-      setPickup(compactAddress(suggestion.displayName));
-      setPickupCoordinate(coordinate);
-      setPickupSuggestions([]);
-    } else {
-      setDropoff(compactAddress(suggestion.displayName));
-      setDropoffCoordinate(coordinate);
-      setDropoffSuggestions([]);
-    }
+    applyLocation(field, place, {
+      remember: true,
+      showToast: false,
+    });
+  };
 
-    setActiveField(null);
-    animateMapToCoordinate(coordinate);
+  const handleSavedPlacePress = (place: QuickPlace) => {
+    applyLocation(quickAssignField, place, {
+      remember: true,
+      showToast: true,
+    });
+  };
+
+  const handleRecentPlacePress = (place: QuickPlace) => {
+    applyLocation(quickAssignField, place, {
+      remember: true,
+      showToast: true,
+      toastLabel: 'Recent location',
+    });
   };
 
   const handleRequestDriver = () => {
@@ -512,6 +663,22 @@ export default function App() {
         </MapView>
       </View>
 
+      <View style={styles.tripMetaCard}>
+        <View style={styles.tripMetaPill}>
+          <MaterialCommunityIcons name="map-marker-distance" size={16} color={COLORS.primary} />
+          <Text style={styles.tripMetaText}>{distanceKm.toFixed(1)} km trip</Text>
+        </View>
+        <View style={styles.tripMetaPill}>
+          <MaterialCommunityIcons name="clock-outline" size={16} color={COLORS.primary} />
+          <Text style={styles.tripMetaText}>ETA {selectedRide?.eta ?? '--'}</Text>
+        </View>
+        <View style={styles.tripMetaPill}>
+          <MaterialCommunityIcons name="cash-multiple" size={16} color={COLORS.primary} />
+          <Text style={styles.tripMetaText}>{selectedRide?.fare ?? '--'}</Text>
+        </View>
+      </View>
+      <Text style={styles.openSourceHint}>Search powered by OpenStreetMap Nominatim.</Text>
+
       <View style={styles.formCard}>
         <Text style={styles.fieldLabel}>Where is your car?</Text>
         <TextInput
@@ -519,10 +686,14 @@ export default function App() {
           placeholder="Enter pickup address"
           placeholderTextColor="#8390A2"
           value={pickup}
-          onFocus={() => setActiveField('pickup')}
+          onFocus={() => {
+            setActiveField('pickup');
+            setQuickAssignField('pickup');
+          }}
           onChangeText={(text) => {
             setPickup(text);
             setActiveField('pickup');
+            setQuickAssignField('pickup');
           }}
         />
         {renderSuggestions('pickup')}
@@ -540,18 +711,98 @@ export default function App() {
           placeholder="Enter destination address"
           placeholderTextColor="#8390A2"
           value={dropoff}
-          onFocus={() => setActiveField('dropoff')}
+          onFocus={() => {
+            setActiveField('dropoff');
+            setQuickAssignField('dropoff');
+          }}
           onChangeText={(text) => {
             setDropoff(text);
             setActiveField('dropoff');
+            setQuickAssignField('dropoff');
           }}
         />
         {renderSuggestions('dropoff')}
       </View>
 
+      <View style={styles.quickPlacesCard}>
+        <View style={styles.quickHeader}>
+          <Text style={styles.quickTitle}>Saved places</Text>
+          <View style={styles.quickFieldToggle}>
+            <Pressable
+              style={[
+                styles.quickFieldButton,
+                quickAssignField === 'pickup' && styles.quickFieldButtonActive,
+              ]}
+              onPress={() => setQuickAssignField('pickup')}
+            >
+              <Text
+                style={[
+                  styles.quickFieldButtonText,
+                  quickAssignField === 'pickup' && styles.quickFieldButtonTextActive,
+                ]}
+              >
+                Set Pickup
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.quickFieldButton,
+                quickAssignField === 'dropoff' && styles.quickFieldButtonActive,
+              ]}
+              onPress={() => setQuickAssignField('dropoff')}
+            >
+              <Text
+                style={[
+                  styles.quickFieldButtonText,
+                  quickAssignField === 'dropoff' && styles.quickFieldButtonTextActive,
+                ]}
+              >
+                Set Drop-off
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.savedPlacesGrid}>
+          {SAVED_PLACES.map((place) => (
+            <Pressable
+              key={place.id}
+              style={styles.savedPlaceChip}
+              onPress={() => handleSavedPlacePress(place)}
+            >
+              <Text style={styles.savedPlaceLabel}>{place.label}</Text>
+              <Text style={styles.savedPlaceAddress} numberOfLines={1}>
+                {place.address}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={styles.recentTitle}>Recent locations</Text>
+        {recentPlaces.length === 0 ? (
+          <Text style={styles.recentEmptyText}>No recent locations yet.</Text>
+        ) : (
+          recentPlaces.map((place, index) => (
+            <Pressable
+              key={`${place.id}-${index}`}
+              style={[styles.recentRow, index === recentPlaces.length - 1 && styles.recentRowLast]}
+              onPress={() => handleRecentPlacePress(place)}
+            >
+              <MaterialCommunityIcons name="history" size={16} color={COLORS.primary} />
+              <View style={styles.recentTextWrap}>
+                <Text style={styles.recentLabel}>{place.label}</Text>
+                <Text style={styles.recentAddress} numberOfLines={1}>
+                  {place.address}
+                </Text>
+              </View>
+            </Pressable>
+          ))
+        )}
+      </View>
+
       <View style={styles.optionsCard}>
         <Text style={styles.optionsTitle}>Choose your service</Text>
-        {RIDE_OPTIONS.map((option) => {
+        {rideOptions.map((option) => {
           const isSelected = option.id === selectedRideId;
           return (
             <Pressable
@@ -813,6 +1064,35 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  tripMetaCard: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  tripMetaPill: {
+    flex: 1,
+    borderRadius: 999,
+    backgroundColor: '#EAF8FF',
+    borderWidth: 1,
+    borderColor: '#D7EEF9',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  tripMetaText: {
+    fontFamily: 'Lexend_500Medium',
+    fontSize: 11,
+    color: COLORS.primary,
+  },
+  openSourceHint: {
+    marginTop: -4,
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 10,
+    color: COLORS.mutedText,
+    textAlign: 'center',
+  },
   formCard: {
     backgroundColor: COLORS.white,
     borderRadius: 18,
@@ -908,6 +1188,111 @@ const styles = StyleSheet.create({
     fontFamily: 'Lexend_500Medium',
     fontSize: 12,
     color: COLORS.primary,
+  },
+  quickPlacesCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E1E8F3',
+    padding: 14,
+  },
+  quickHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  quickTitle: {
+    fontFamily: 'Lexend_600SemiBold',
+    fontSize: 14,
+    color: COLORS.text,
+  },
+  quickFieldToggle: {
+    flexDirection: 'row',
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#D7E0EE',
+    backgroundColor: '#F4F7FC',
+    padding: 2,
+  },
+  quickFieldButton: {
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+  },
+  quickFieldButtonActive: {
+    backgroundColor: COLORS.primary,
+  },
+  quickFieldButtonText: {
+    fontFamily: 'Lexend_500Medium',
+    fontSize: 11,
+    color: COLORS.mutedText,
+  },
+  quickFieldButtonTextActive: {
+    color: COLORS.white,
+  },
+  savedPlacesGrid: {
+    marginTop: 10,
+    gap: 8,
+  },
+  savedPlaceChip: {
+    borderWidth: 1,
+    borderColor: '#DAE3F2',
+    backgroundColor: '#F8FAFD',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 11,
+  },
+  savedPlaceLabel: {
+    fontFamily: 'Lexend_600SemiBold',
+    fontSize: 12,
+    color: COLORS.text,
+  },
+  savedPlaceAddress: {
+    marginTop: 2,
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 11,
+    color: COLORS.mutedText,
+  },
+  recentTitle: {
+    marginTop: 12,
+    fontFamily: 'Lexend_600SemiBold',
+    fontSize: 13,
+    color: COLORS.text,
+  },
+  recentEmptyText: {
+    marginTop: 6,
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 12,
+    color: COLORS.mutedText,
+  },
+  recentRow: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#E3EAF5',
+    borderRadius: 11,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  recentRowLast: {
+    marginBottom: 0,
+  },
+  recentTextWrap: {
+    flex: 1,
+  },
+  recentLabel: {
+    fontFamily: 'Lexend_500Medium',
+    fontSize: 12,
+    color: COLORS.text,
+  },
+  recentAddress: {
+    marginTop: 1,
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 11,
+    color: COLORS.mutedText,
   },
   optionsCard: {
     backgroundColor: COLORS.white,
