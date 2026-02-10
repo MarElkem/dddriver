@@ -6,11 +6,14 @@ import {
 } from '@expo-google-fonts/lexend';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFonts } from 'expo-font';
+import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   Easing,
+  Image,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -19,9 +22,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { LatLng, Marker, Polyline } from 'react-native-maps';
 
 type TabKey = 'request' | 'howTo' | 'profile';
+type LocationField = 'pickup' | 'dropoff';
 
 type RideOption = {
   id: string;
@@ -29,6 +33,13 @@ type RideOption = {
   detail: string;
   eta: string;
   fare: string;
+};
+
+type LocationSuggestion = {
+  id: string;
+  displayName: string;
+  latitude: number;
+  longitude: number;
 };
 
 const COLORS = {
@@ -78,14 +89,58 @@ const MAP_REGION = {
   longitudeDelta: 0.04,
 };
 
-const PICKUP_COORDINATE = {
+const PICKUP_COORDINATE: LatLng = {
   latitude: 37.7728,
   longitude: -122.423,
 };
 
-const DROPOFF_COORDINATE = {
+const DROPOFF_COORDINATE: LatLng = {
   latitude: 37.7812,
   longitude: -122.4094,
+};
+
+const BICYCLE_HERO = require('./assets/bicycle-hero.jpg');
+
+const compactAddress = (displayName: string) => {
+  const parts = displayName
+    .split(',')
+    .map((piece) => piece.trim())
+    .filter(Boolean);
+
+  return parts.slice(0, 3).join(', ');
+};
+
+const fetchLocationSuggestions = async (query: string): Promise<LocationSuggestion[]> => {
+  const params = new URLSearchParams({
+    q: query,
+    format: 'jsonv2',
+    addressdetails: '1',
+    limit: '5',
+  });
+
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+    headers: {
+      Accept: 'application/json',
+      'Accept-Language': 'en',
+      'User-Agent': 'DD-DRIVER-Mobile/1.0',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error('Unable to load address suggestions.');
+  }
+
+  const data: Array<{ place_id: number; display_name: string; lat: string; lon: string }> =
+    await response.json();
+
+  return data
+    .map((place) => ({
+      id: String(place.place_id),
+      displayName: place.display_name,
+      latitude: Number(place.lat),
+      longitude: Number(place.lon),
+    }))
+    .filter((place) => Number.isFinite(place.latitude) && Number.isFinite(place.longitude));
 };
 
 export default function App() {
@@ -100,7 +155,16 @@ export default function App() {
   const [dropoff, setDropoff] = useState('');
   const [selectedRideId, setSelectedRideId] = useState(RIDE_OPTIONS[0].id);
   const [statusMessage, setStatusMessage] = useState('');
+  const [pickupCoordinate, setPickupCoordinate] = useState<LatLng>(PICKUP_COORDINATE);
+  const [dropoffCoordinate, setDropoffCoordinate] = useState<LatLng>(DROPOFF_COORDINATE);
+  const [activeField, setActiveField] = useState<LocationField | null>(null);
+  const [pickupSuggestions, setPickupSuggestions] = useState<LocationSuggestion[]>([]);
+  const [dropoffSuggestions, setDropoffSuggestions] = useState<LocationSuggestion[]>([]);
+  const [isPickupSearching, setIsPickupSearching] = useState(false);
+  const [isDropoffSearching, setIsDropoffSearching] = useState(false);
+  const [isMapReady, setIsMapReady] = useState(false);
 
+  const mapRef = useRef<MapView>(null);
   const contentOpacity = useRef(new Animated.Value(1)).current;
   const contentTranslate = useRef(new Animated.Value(0)).current;
   const requestButtonScale = useRef(new Animated.Value(1)).current;
@@ -155,6 +219,100 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, [statusMessage, statusOpacity]);
 
+  useEffect(() => {
+    if (!isMapReady || !mapRef.current) {
+      return;
+    }
+
+    mapRef.current.fitToCoordinates([pickupCoordinate, dropoffCoordinate], {
+      animated: true,
+      edgePadding: {
+        top: 70,
+        right: 70,
+        bottom: 70,
+        left: 70,
+      },
+    });
+  }, [pickupCoordinate, dropoffCoordinate, isMapReady]);
+
+  useEffect(() => {
+    if (activeField !== 'pickup') {
+      setIsPickupSearching(false);
+      return;
+    }
+
+    const query = pickup.trim();
+    if (query.length < 3) {
+      setPickupSuggestions([]);
+      setIsPickupSearching(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsPickupSearching(true);
+
+    const timeout = setTimeout(async () => {
+      try {
+        const results = await fetchLocationSuggestions(query);
+        if (!cancelled) {
+          setPickupSuggestions(results);
+        }
+      } catch {
+        if (!cancelled) {
+          setPickupSuggestions([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsPickupSearching(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [pickup, activeField]);
+
+  useEffect(() => {
+    if (activeField !== 'dropoff') {
+      setIsDropoffSearching(false);
+      return;
+    }
+
+    const query = dropoff.trim();
+    if (query.length < 3) {
+      setDropoffSuggestions([]);
+      setIsDropoffSearching(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsDropoffSearching(true);
+
+    const timeout = setTimeout(async () => {
+      try {
+        const results = await fetchLocationSuggestions(query);
+        if (!cancelled) {
+          setDropoffSuggestions(results);
+        }
+      } catch {
+        if (!cancelled) {
+          setDropoffSuggestions([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsDropoffSearching(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [dropoff, activeField]);
+
   if (!fontsLoaded) {
     return null;
   }
@@ -177,6 +335,82 @@ export default function App() {
     }).start();
   };
 
+  const animateMapToCoordinate = (coordinate: LatLng) => {
+    if (!mapRef.current) {
+      return;
+    }
+
+    mapRef.current.animateToRegion(
+      {
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+        latitudeDelta: 0.02,
+        longitudeDelta: 0.02,
+      },
+      320
+    );
+  };
+
+  const handleUseCurrentLocation = async () => {
+    try {
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (permission.status !== 'granted') {
+        setStatusMessage('Enable location access to use your current pickup.');
+        return;
+      }
+
+      const currentLocation = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const coordinate = {
+        latitude: currentLocation.coords.latitude,
+        longitude: currentLocation.coords.longitude,
+      };
+
+      setPickupCoordinate(coordinate);
+      setPickupSuggestions([]);
+      setActiveField(null);
+      animateMapToCoordinate(coordinate);
+
+      const reversedAddresses = await Location.reverseGeocodeAsync(coordinate);
+      const bestMatch = reversedAddresses[0];
+
+      if (bestMatch) {
+        const lineOne = [bestMatch.name, bestMatch.street].filter(Boolean).join(' ');
+        const lineTwo = [bestMatch.city, bestMatch.region].filter(Boolean).join(', ');
+        const formattedAddress = [lineOne.trim(), lineTwo].filter(Boolean).join(', ');
+        setPickup(formattedAddress || 'Current location');
+      } else {
+        setPickup('Current location');
+      }
+
+      setStatusMessage('Pickup updated to your current location.');
+    } catch {
+      setStatusMessage('Unable to get your current location right now.');
+    }
+  };
+
+  const handleSelectSuggestion = (field: LocationField, suggestion: LocationSuggestion) => {
+    const coordinate = {
+      latitude: suggestion.latitude,
+      longitude: suggestion.longitude,
+    };
+
+    if (field === 'pickup') {
+      setPickup(compactAddress(suggestion.displayName));
+      setPickupCoordinate(coordinate);
+      setPickupSuggestions([]);
+    } else {
+      setDropoff(compactAddress(suggestion.displayName));
+      setDropoffCoordinate(coordinate);
+      setDropoffSuggestions([]);
+    }
+
+    setActiveField(null);
+    animateMapToCoordinate(coordinate);
+  };
+
   const handleRequestDriver = () => {
     if (!pickup.trim() || !dropoff.trim()) {
       setStatusMessage('Add both pickup and drop-off locations.');
@@ -184,7 +418,55 @@ export default function App() {
     }
 
     setStatusMessage(
-      `DD Driver requested. ETA ${selectedRide?.eta ?? '8 min'} • ${selectedRide?.title ?? 'DD Classic'}`
+      `DD Driver requested. ETA ${selectedRide?.eta ?? '8 min'} - ${selectedRide?.title ?? 'DD Classic'}`
+    );
+  };
+
+  const renderSuggestions = (field: LocationField) => {
+    const query = field === 'pickup' ? pickup.trim() : dropoff.trim();
+    const isSearching = field === 'pickup' ? isPickupSearching : isDropoffSearching;
+    const suggestions = field === 'pickup' ? pickupSuggestions : dropoffSuggestions;
+
+    if (activeField !== field || query.length < 1) {
+      return null;
+    }
+
+    if (query.length < 3) {
+      return (
+        <Text style={styles.suggestionHint}>Type at least 3 characters to search addresses.</Text>
+      );
+    }
+
+    return (
+      <View style={styles.suggestionsBox}>
+        {isSearching ? (
+          <View style={styles.suggestionLoadingRow}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.suggestionLoadingText}>Finding locations...</Text>
+          </View>
+        ) : null}
+
+        {!isSearching && suggestions.length === 0 ? (
+          <Text style={styles.suggestionEmptyText}>No matching addresses found.</Text>
+        ) : null}
+
+        {!isSearching &&
+          suggestions.map((suggestion, index) => (
+            <Pressable
+              key={suggestion.id}
+              onPress={() => handleSelectSuggestion(field, suggestion)}
+              style={[
+                styles.suggestionRow,
+                index === suggestions.length - 1 && styles.suggestionRowLast,
+              ]}
+            >
+              <MaterialCommunityIcons name="map-marker-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.suggestionText} numberOfLines={2}>
+                {suggestion.displayName}
+              </Text>
+            </Pressable>
+          ))}
+      </View>
     );
   };
 
@@ -193,11 +475,10 @@ export default function App() {
       style={styles.sectionScroll}
       contentContainerStyle={styles.sectionContent}
       showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
     >
       <View style={styles.heroCard}>
-        <View style={styles.heroIconWrapper}>
-          <MaterialCommunityIcons name="bike-fast" size={34} color={COLORS.primary} />
-        </View>
+        <Image source={BICYCLE_HERO} style={styles.heroImage} resizeMode="cover" />
         <Text style={styles.heroTitle}>Request a DD Driver</Text>
         <Text style={styles.heroSubtitle}>
           We bring a trusted designated driver to your location.
@@ -205,17 +486,27 @@ export default function App() {
       </View>
 
       <View style={styles.mapCard}>
-        <MapView style={styles.map} initialRegion={MAP_REGION}>
+        <MapView
+          ref={mapRef}
+          style={styles.map}
+          initialRegion={MAP_REGION}
+          onMapReady={() => setIsMapReady(true)}
+        >
+          <Polyline
+            coordinates={[pickupCoordinate, dropoffCoordinate]}
+            strokeWidth={4}
+            strokeColor={COLORS.primary}
+          />
           <Marker
-            coordinate={PICKUP_COORDINATE}
+            coordinate={pickupCoordinate}
             title="Your Car"
-            description="Pickup location"
+            description={pickup || 'Pickup location'}
             pinColor={COLORS.primary}
           />
           <Marker
-            coordinate={DROPOFF_COORDINATE}
+            coordinate={dropoffCoordinate}
             title="Drop-off"
-            description="Your destination"
+            description={dropoff || 'Your destination'}
             pinColor="#35557F"
           />
         </MapView>
@@ -228,10 +519,15 @@ export default function App() {
           placeholder="Enter pickup address"
           placeholderTextColor="#8390A2"
           value={pickup}
-          onChangeText={setPickup}
+          onFocus={() => setActiveField('pickup')}
+          onChangeText={(text) => {
+            setPickup(text);
+            setActiveField('pickup');
+          }}
         />
+        {renderSuggestions('pickup')}
 
-        <Pressable onPress={() => setPickup('Current location')} style={styles.currentLocationChip}>
+        <Pressable onPress={handleUseCurrentLocation} style={styles.currentLocationChip}>
           <MaterialCommunityIcons name="crosshairs-gps" size={16} color={COLORS.primary} />
           <Text style={styles.currentLocationText}>Use current location</Text>
         </Pressable>
@@ -244,8 +540,13 @@ export default function App() {
           placeholder="Enter destination address"
           placeholderTextColor="#8390A2"
           value={dropoff}
-          onChangeText={setDropoff}
+          onFocus={() => setActiveField('dropoff')}
+          onChangeText={(text) => {
+            setDropoff(text);
+            setActiveField('dropoff');
+          }}
         />
+        {renderSuggestions('dropoff')}
       </View>
 
       <View style={styles.optionsCard}>
@@ -364,16 +665,16 @@ export default function App() {
       <View style={styles.historyCard}>
         <Text style={styles.historyTitle}>Recent rides</Text>
         <View style={styles.historyRow}>
-          <Text style={styles.historyPlace}>Downtown Garage → West Ave</Text>
-          <Text style={styles.historyMeta}>5.0 • Jan 28</Text>
+          <Text style={styles.historyPlace}>Downtown Garage - West Ave</Text>
+          <Text style={styles.historyMeta}>5.0 - Jan 28</Text>
         </View>
         <View style={styles.historyRow}>
-          <Text style={styles.historyPlace}>Market Street → Hill Crest</Text>
-          <Text style={styles.historyMeta}>4.8 • Jan 20</Text>
+          <Text style={styles.historyPlace}>Market Street - Hill Crest</Text>
+          <Text style={styles.historyMeta}>4.8 - Jan 20</Text>
         </View>
         <View style={styles.historyRow}>
-          <Text style={styles.historyPlace}>North Pier → Oak Ridge</Text>
-          <Text style={styles.historyMeta}>5.0 • Jan 12</Text>
+          <Text style={styles.historyPlace}>North Pier - Oak Ridge</Text>
+          <Text style={styles.historyMeta}>5.0 - Jan 12</Text>
         </View>
       </View>
     </ScrollView>
@@ -479,18 +780,14 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
     borderRadius: 18,
     padding: 14,
-    alignItems: 'center',
     borderWidth: 1,
     borderColor: '#E1E8F3',
   },
-  heroIconWrapper: {
-    width: 58,
-    height: 58,
-    borderRadius: 29,
-    backgroundColor: '#EAF8FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
+  heroImage: {
+    width: '100%',
+    height: 132,
+    borderRadius: 14,
+    marginBottom: 10,
   },
   heroTitle: {
     fontFamily: 'Lexend_700Bold',
@@ -506,7 +803,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   mapCard: {
-    height: 200,
+    height: 220,
     borderRadius: 18,
     overflow: 'hidden',
     borderWidth: 1,
@@ -542,6 +839,59 @@ const styles = StyleSheet.create({
     fontFamily: 'Lexend_500Medium',
     color: COLORS.text,
     fontSize: 13,
+  },
+  suggestionsBox: {
+    marginTop: 7,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#D6DEEB',
+    backgroundColor: '#F9FBFF',
+    overflow: 'hidden',
+  },
+  suggestionHint: {
+    marginTop: 8,
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 11,
+    color: COLORS.mutedText,
+  },
+  suggestionLoadingRow: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  suggestionLoadingText: {
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 12,
+    color: COLORS.mutedText,
+  },
+  suggestionEmptyText: {
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    fontFamily: 'Lexend_400Regular',
+    fontSize: 12,
+    color: COLORS.mutedText,
+  },
+  suggestionRow: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    borderColor: '#E4EBF6',
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+  },
+  suggestionRowLast: {
+    borderBottomWidth: 0,
+  },
+  suggestionText: {
+    flex: 1,
+    fontFamily: 'Lexend_400Regular',
+    color: COLORS.text,
+    fontSize: 12,
+    lineHeight: 18,
   },
   currentLocationChip: {
     marginTop: 10,
